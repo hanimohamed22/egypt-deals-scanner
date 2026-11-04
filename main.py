@@ -13,10 +13,9 @@ MIN_DISCOUNT = 40  # نسبة الخصم المطلوبة 40%
 
 SEEN_FILE = "seen_deals.json"
 
-HEADERS = {
+HEADERS_DESKTOP = {
     "Accept-Language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Referer": "https://www.google.com.eg/",
 }
 
 def clean_num(text):
@@ -26,30 +25,6 @@ def clean_num(text):
     text = str(text).translate(arabic_map).replace(",", "")
     match = re.search(r"\d+(\.\d+)?", text)
     return float(match.group(0)) if match else 0.0
-
-def smart_fetch(url, session):
-    """جلب الصفحة مباشرة، وفي حالة حظر 403 أو كابتشا يستخدم بوابة عبور بديلة"""
-    try:
-        r = session.get(url, headers=HEADERS, timeout=25)
-        if r.status_code == 200 and len(r.text) > 5000 and "api-services-support@amazon.com" not in r.text:
-            return r.text, 200
-    except Exception:
-        pass
-
-    # بديل رقم 1: عبر بوابة CorsProxy / AllOrigins لتخطي حظر IP الداتا سنتر
-    proxy_urls = [
-        f"https://api.allorigins.win/raw?url={urllib.parse.quote(url)}",
-        f"https://api.codetabs.com/v1/proxy?quest={urllib.parse.quote(url)}"
-    ]
-    for p_url in proxy_urls:
-        try:
-            pr = requests.get(p_url, timeout=30)
-            if pr.status_code == 200 and len(pr.text) > 5000:
-                return pr.text, 200
-        except Exception:
-            continue
-
-    return "", 403
 
 def load_seen():
     if os.path.exists(SEEN_FILE):
@@ -98,112 +73,133 @@ def send_deal_to_telegram(deal):
     except Exception as e:
         print(f"[!] خطأ إرسال تليجرام: {e}")
 
-# ================= 1. فاحص 2B مصر (بوابة GraphQL الرسمية + HTML) =================
-def scan_2b():
+# ================= 1. فاحص أمازون مصر (موبايل + قارئ نصوص شامل) =================
+def scan_amazon():
     deals = []
-    session = cureq.Session(impersonate="chrome120")
-    
-    # أولاً: سحب مباشر من بوابة GraphQL الرسمية لـ 2B (لا تحظر السيرفرات أبداً)
-    gql_url = "https://2b.com.eg/graphql"
-    search_terms = ["a", "e", "i", "s", "pro", "samsung", "hp", "dell", "xiaomi", "tornado"]
-    gql_items_count = 0
-    
-    for term in search_terms:
-        query = """
-        {
-          products(search: "%s", pageSize: 50) {
-            items {
-              name
-              sku
-              url_key
-              small_image { url }
-              price_range {
-                minimum_price {
-                  regular_price { value }
-                  final_price { value }
-                  discount { percent_off }
-                }
-              }
-            }
-          }
-        }
-        """ % term
-        try:
-            r = session.post(gql_url, json={"query": query}, headers={"Store": "ar"}, timeout=20)
-            if r.status_code == 200:
-                items = r.json().get("data", {}).get("products", {}).get("items", [])
-                gql_items_count += len(items)
-                for item in items:
-                    pr = item.get("price_range", {}).get("minimum_price", {})
-                    old_p = float(pr.get("regular_price", {}).get("value") or 0)
-                    new_p = float(pr.get("final_price", {}).get("value") or 0)
-                    disc = float(pr.get("discount", {}).get("percent_off") or 0)
-                    if old_p > new_p > 0:
-                        if disc == 0:
-                            disc = round(((old_p - new_p) / old_p) * 100)
-                        url_key = item.get("url_key", "")
-                        full_url = f"https://2b.com.eg/ar/{url_key}.html"
-                        deals.append({
-                            "id": f"2b_{item.get('sku')}",
-                            "store": "2B Egypt 💻",
-                            "title": item.get("name", "منتج 2B"),
-                            "new_price": new_p,
-                            "old_price": old_p,
-                            "discount": int(round(disc)),
-                            "url": full_url,
-                            "image": item.get("small_image", {}).get("url", "")
-                        })
-        except Exception:
-            continue
-
-    print(f"  -> 2B GraphQL API: تم فحص {gql_items_count} منتج بنجاح")
-    return deals
-
-# ================= 2. فاحص جوميا مصر =================
-def scan_jumia():
-    deals = []
-    session = cureq.Session(impersonate="chrome120")
+    session = cureq.Session(impersonate="safari_ios")
+    mobile_headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+        "Accept-Language": "ar-EG,ar;q=0.9"
+    }
     urls = [
-        "https://www.jumia.com.eg/ar/flash-sales/",
-        "https://www.jumia.com.eg/ar/electronics/",
-        "https://www.jumia.com.eg/ar/phones-tablets/",
-        "https://www.jumia.com.eg/ar/computing/",
-        "https://www.jumia.com.eg/ar/home-office-appliances/"
+        "https://www.amazon.eg/s?k=electronics&rh=p_n_pct-off-with-tax%3A26901062031&language=ar_AE",
+        "https://www.amazon.eg/s?k=phones&rh=p_n_pct-off-with-tax%3A26901062031&language=ar_AE",
+        "https://www.amazon.eg/s?k=laptop&rh=p_n_pct-off-with-tax%3A26901062031&language=ar_AE",
+        "https://www.amazon.eg/s?k=kitchen&rh=p_n_pct-off-with-tax%3A26901062031&language=ar_AE",
+        "https://www.amazon.eg/s?k=خصم&language=ar_AE"
     ]
     for url in urls:
-        html, code = smart_fetch(url, session)
-        soup = BeautifulSoup(html, "lxml") if html else None
-        cards = soup.select("article.prd") if soup else []
-        cat_name = url.split("/")[-2]
-        print(f"  -> جوميا ({cat_name}): كود {code} | تم فحص {len(cards)} منتج")
-        
-        for card in cards:
-            link_el = card.select_one("a.core")
-            if not link_el:
-                continue
-            title = (card.select_one("h3.name") or link_el).get_text(strip=True)
-            new_p = clean_num(card.select_one(".prc").get_text() if card.select_one(".prc") else "")
-            old_p = clean_num(card.select_one(".old").get_text() if card.select_one(".old") else "")
-            disc_el = card.select_one(".bdg._dsct")
-            disc = clean_num(disc_el.get_text()) if disc_el else (round(((old_p - new_p) / old_p) * 100) if old_p > new_p else 0)
+        try:
+            r = session.get(url, headers=mobile_headers, timeout=25)
+            soup = BeautifulSoup(r.text, "lxml")
+            cards = [c for c in soup.select('div[data-asin]') if c.get("data-asin") and len(c.get("data-asin", "")) == 10]
+            print(f"  -> أمازون: كود {r.status_code} | تم فحص {len(cards)} منتج")
+            
+            for card in cards:
+                asin = card.get("data-asin")
+                text_all = card.get_text(" | ", strip=True)
+                
+                title_el = card.select_one("h2") or card.select_one(".a-size-base-plus") or card.select_one(".a-size-small")
+                img_el = card.select_one("img.s-image") or card.select_one("img")
+                title = title_el.get_text(strip=True) if title_el else (img_el.get("alt") if img_el else "منتج أمازون")
+                if not title or len(title) < 4:
+                    continue
 
-            if disc > 0 and new_p > 0:
-                if old_p <= new_p:
+                # استخراج كل الأسعار المكتوبة جنب ج.م أو EGP
+                arabic_map = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+                norm_text = text_all.translate(arabic_map)
+                price_matches = re.findall(r"(?:ج\.م\.?|EGP)\s*([\d,]+(?:\.\d+)?)|([\d,]+(?:\.\d+)?)\s*(?:ج\.م\.?|EGP)", norm_text)
+                prices = []
+                for m1, m2 in price_matches:
+                    val = clean_num(m1 or m2)
+                    if val >= 20:
+                        prices.append(val)
+
+                # أو من عناصر السعر التقليدية
+                if not prices:
+                    for p_el in card.select(".a-offscreen, .a-price-whole"):
+                        val = clean_num(p_el.get_text())
+                        if val >= 20:
+                            prices.append(val)
+
+                if not prices:
+                    continue
+
+                new_p = min(prices)
+                old_p = max(prices) if len(set(prices)) > 1 else 0
+
+                # البحث عن نسبة الخصم المكتوبة في الكارت مثل -45% أو (45% خصم)
+                disc_match = re.search(r"-\s*(\d{2})\s*%|(\d{2})\s*%\s*(?:خصم|off)", norm_text, re.I)
+                disc = int(disc_match.group(1) or disc_match.group(2)) if disc_match else 0
+
+                if old_p > new_p and disc == 0:
+                    disc = round(((old_p - new_p) / old_p) * 100)
+                elif disc > 0 and old_p <= new_p and disc < 95:
                     old_p = round(new_p / (1 - disc / 100))
-                img_el = card.select_one("img.img")
-                img = (img_el.get("data-src") or img_el.get("src")) if img_el else ""
-                href = link_el.get("href", "")
-                full_url = f"https://www.jumia.com.eg{href}" if href.startswith("/") else href
-                deals.append({
-                    "id": full_url.split("?")[0],
-                    "store": "Jumia EG 🟠",
-                    "title": title,
-                    "new_price": new_p,
-                    "old_price": old_p,
-                    "discount": int(disc),
-                    "url": full_url,
-                    "image": img
-                })
+
+                if disc > 0 and new_p > 0:
+                    img = img_el.get("src") if img_el else ""
+                    deals.append({
+                        "id": f"amz_{asin}",
+                        "store": "Amazon EG 🛒",
+                        "title": title,
+                        "new_price": new_p,
+                        "old_price": old_p,
+                        "discount": int(disc),
+                        "url": f"https://www.amazon.eg/-/ar/dp/{asin}",
+                        "image": img
+                    })
+        except Exception as e:
+            print(f"[!] خطأ في أمازون: {e}")
+    return deals
+
+# ================= 2. فاحص 2B مصر (الروابط الصافية التي نجحت) =================
+def scan_2b():
+    deals = []
+    urls = [
+        "https://2b.com.eg/ar/home-appliances.html",
+        "https://2b.com.eg/ar/home-appliances.html?p=2",
+        "https://2b.com.eg/ar/computers.html",
+        "https://2b.com.eg/ar/mobile-and-tablet.html",
+        "https://2b.com.eg/ar/gaming.html"
+    ]
+    for url in urls:
+        try:
+            r = cureq.get(url, headers=HEADERS_DESKTOP, impersonate="chrome120", timeout=25)
+            soup = BeautifulSoup(r.text, "lxml")
+            cards = soup.select(".product-item-info")
+            print(f"  -> 2B ({url.split('/')[-1]}): كود {r.status_code} | تم فحص {len(cards)} منتج")
+            for card in cards:
+                link_el = card.select_one("a.product-item-link")
+                if not link_el:
+                    continue
+                title = link_el.get_text(strip=True)
+                full_url = link_el.get("href", "")
+                
+                # قراءة كل الأسعار الموجودة في الكارت
+                prices = []
+                for p_el in card.select('[data-price-amount], .price'):
+                    val = clean_num(p_el.get("data-price-amount") or p_el.get_text())
+                    if val > 30:
+                        prices.append(val)
+                if len(set(prices)) >= 2:
+                    new_p = min(prices)
+                    old_p = max(prices)
+                    disc = round(((old_p - new_p) / old_p) * 100)
+                    img_el = card.select_one("img.product-image-photo")
+                    img = (img_el.get("data-src") or img_el.get("src")) if img_el else ""
+                    deals.append({
+                        "id": full_url.split("?")[0],
+                        "store": "2B Egypt 💻",
+                        "title": title,
+                        "new_price": new_p,
+                        "old_price": old_p,
+                        "discount": int(disc),
+                        "url": full_url,
+                        "image": img
+                    })
+        except Exception as e:
+            print(f"[!] خطأ في 2B: {e}")
     return deals
 
 # ================= 3. فاحص نون مصر =================
@@ -213,138 +209,128 @@ def scan_noon():
     urls = [
         "https://www.noon.com/egypt-ar/electronics/",
         "https://www.noon.com/egypt-ar/mobiles/",
-        "https://www.noon.com/egypt-ar/laptops/",
-        "https://www.noon.com/egypt-ar/eg-mega-deals/"
+        "https://www.noon.com/egypt-ar/laptops/"
     ]
     for url in urls:
-        html, code = smart_fetch(url, session)
-        if not html:
-            print(f"  -> نون ({url.split('/')[-2]}): كود {code} | 0 منتج")
-            continue
-        soup = BeautifulSoup(html, "lxml")
-        cards = soup.select('a[href*="/egypt-ar/"][href*="/p/"]')
-        
-        # استخراج إضافي من JSON نون المدمج في الصفحة
-        json_matches = re.findall(r'"sku"\s*:\s*"([^"]+)"[^{}]*?"name"\s*:\s*"([^"]+)"[^{}]*?"price"\s*:\s*([\d.]+)[^{}]*?"sale_price"\s*:\s*([\d.]+)', html)
-        print(f"  -> نون ({url.split('/')[-2]}): كود {code} | تم فحص {len(cards) + len(json_matches)} منتج")
-
-        for sku, title, old_s, new_s in json_matches:
-            old_p, new_p = float(old_s), float(new_s)
-            if old_p > new_p > 0:
-                disc = round(((old_p - new_p) / old_p) * 100)
+        try:
+            r = session.get(url, timeout=25)
+            soup = BeautifulSoup(r.text, "lxml")
+            # جلب أي رابط منتج في الصفحة أو قراءة البيانات من سكريبت Next.js
+            cards = soup.select('a[href*="/p/"]')
+            print(f"  -> نون ({url.split('/')[-2]}): كود {r.status_code} | تم فحص {len(cards)} كارت")
+            for card in cards:
+                text = card.get_text(" | ", strip=True)
+                arabic_map = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+                norm_text = text.translate(arabic_map)
+                disc_match = re.search(r"(\d{2})\s*%", norm_text)
+                if not disc_match:
+                    continue
+                disc = int(disc_match.group(1))
+                if disc > 95 or disc < 5:
+                    continue
+                prices = [clean_num(m.group(0)) for m in re.finditer(r"[\d,]+(?:\.\d+)?", norm_text)]
+                prices = [pr for pr in prices if pr > 50 and pr != disc]
+                if not prices:
+                    continue
+                new_p = min(prices)
+                old_p = max(prices) if len(set(prices)) > 1 else round(new_p / (1 - disc / 100))
+                href = card.get("href", "")
+                full_url = f"https://www.noon.com{href}" if href.startswith("/") else href
+                img_el = card.select_one("img")
+                img = img_el.get("src") if img_el else ""
+                title = (img_el.get("alt") if (img_el and img_el.get("alt")) else text.split("|")[0]).strip()
                 deals.append({
-                    "id": f"noon_{sku}",
+                    "id": full_url.split("?")[0],
                     "store": "Noon EG 🟡",
                     "title": title,
                     "new_price": new_p,
                     "old_price": old_p,
-                    "discount": int(disc),
-                    "url": f"https://www.noon.com/egypt-ar/{sku}/p/",
-                    "image": ""
-                })
-
-        for card in cards:
-            text = card.get_text(" | ", strip=True)
-            disc_match = re.search(r"(\d+)\s*%", text)
-            if not disc_match:
-                continue
-            disc = int(disc_match.group(1))
-            if disc > 95:
-                continue
-            prices = [clean_num(m.group(0)) for m in re.finditer(r"[\d,]+(\.\d+)?", text)]
-            prices = [pr for pr in prices if pr > 50 and pr != disc]
-            if not prices:
-                continue
-            new_p = min(prices)
-            old_p = max(prices) if len(prices) > 1 else round(new_p / (1 - disc / 100))
-            href = card.get("href", "")
-            full_url = f"https://www.noon.com{href}" if href.startswith("/") else href
-            img_el = card.select_one("img")
-            img = img_el.get("src") if img_el else ""
-            title = (img_el.get("alt") if (img_el and img_el.get("alt")) else text.split("|")[0]).strip()
-            deals.append({
-                "id": full_url.split("?")[0],
-                "store": "Noon EG 🟡",
-                "title": title,
-                "new_price": new_p,
-                "old_price": old_p,
-                "discount": disc,
-                "url": full_url,
-                "image": img
-            })
-    return deals
-
-# ================= 4. فاحص أمازون مصر =================
-def scan_amazon():
-    deals = []
-    session = cureq.Session(impersonate="safari_ios")
-    urls = [
-        "https://www.amazon.eg/s?k=electronics&rh=p_n_pct-off-with-tax%3A26901062031&language=ar_AE",
-        "https://www.amazon.eg/s?k=phones&rh=p_n_pct-off-with-tax%3A26901062031&language=ar_AE",
-        "https://www.amazon.eg/s?k=laptop&rh=p_n_pct-off-with-tax%3A26901062031&language=ar_AE"
-    ]
-    for url in urls:
-        html, code = smart_fetch(url, session)
-        soup = BeautifulSoup(html, "lxml") if html else None
-        cards = [c for c in (soup.select('div[data-asin]') if soup else []) if c.get("data-asin")]
-        print(f"  -> أمازون: كود {code} | تم فحص {len(cards)} منتج")
-        for card in cards:
-            asin = card.get("data-asin")
-            title_el = card.select_one("h2") or card.select_one(".a-size-base-plus")
-            if not title_el:
-                continue
-            title = title_el.get_text(strip=True)
-            new_el = card.select_one(".a-price:not(.a-text-price) .a-offscreen") or card.select_one(".a-price-whole")
-            old_el = card.select_one(".a-price.a-text-price .a-offscreen")
-            new_p = clean_num(new_el.get_text() if new_el else "")
-            old_p = clean_num(old_el.get_text() if old_el else "")
-
-            if old_p > new_p > 0:
-                disc = round(((old_p - new_p) / old_p) * 100)
-                img_el = card.select_one("img.s-image") or card.select_one("img")
-                img = img_el.get("src") if img_el else ""
-                deals.append({
-                    "id": f"amz_{asin}",
-                    "store": "Amazon EG 🛒",
-                    "title": title,
-                    "new_price": new_p,
-                    "old_price": old_p,
-                    "discount": int(disc),
-                    "url": f"https://www.amazon.eg/-/ar/dp/{asin}",
+                    "discount": disc,
+                    "url": full_url,
                     "image": img
                 })
+        except Exception as e:
+            print(f"[!] خطأ في نون: {e}")
+    return deals
+
+# ================= 4. فاحص جوميا مصر (عبر بوابة القراءة السحابية لتخطي 403) =================
+def scan_jumia():
+    deals = []
+    urls = [
+        "https://www.jumia.com.eg/ar/flash-sales/",
+        "https://www.jumia.com.eg/ar/electronics/",
+        "https://www.jumia.com.eg/ar/phones-tablets/"
+    ]
+    for url in urls:
+        try:
+            # استخدام بوابة Jina Reader لتخطي حظر Cloudflare 403 على سيرفرات GitHub
+            jina_url = f"https://r.jina.ai/{url}"
+            r = requests.get(jina_url, headers={"Accept": "text/plain"}, timeout=30)
+            lines = r.text.splitlines()
+            print(f"  -> جوميا ({url.split('/')[-2]}): كود {r.status_code} | حجم النص {len(r.text)} حرف")
+            
+            # استخراج المنتجات التي تحتوي على روابط جوميا وأسعارها من النص المنسق
+            pattern = re.compile(r"\[([^\]]+)\]\((https://www\.jumia\.com\.eg/[^\)]+\.html)\)")
+            for i, line in enumerate(lines):
+                for match in pattern.finditer(line):
+                    title, link = match.group(1), match.group(2)
+                    if "image" in title.lower() or len(title) < 5:
+                        continue
+                    context_Block = " ".join(lines[max(0, i-2):min(len(lines), i+5)])
+                    arabic_map = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+                    norm_ctx = context_Block.translate(arabic_map)
+                    
+                    disc_m = re.search(r"(\d{2})\s*%", norm_ctx)
+                    prices = [clean_num(m.group(0)) for m in re.finditer(r"([\d,]+\.\d+|[\d,]+)\s*(?:جنيه|ج\.م|EGP)", norm_ctx)]
+                    prices = [p for p in prices if p > 30]
+                    
+                    if prices and disc_m:
+                        disc = int(disc_m.group(1))
+                        new_p = min(prices)
+                        old_p = max(prices) if len(set(prices)) > 1 else round(new_p / (1 - disc / 100))
+                        deals.append({
+                            "id": link.split("?")[0],
+                            "store": "Jumia EG 🟠",
+                            "title": title,
+                            "new_price": new_p,
+                            "old_price": old_p,
+                            "discount": disc,
+                            "url": link,
+                            "image": ""
+                        })
+        except Exception as e:
+            print(f"[!] خطأ في جوميا: {e}")
     return deals
 
 def main():
     seen = load_seen()
     all_deals = []
 
+    print("[*] جاري فحص أمازون...")
+    all_deals.extend(scan_amazon())
+
     print("[*] جاري فحص 2B...")
     all_deals.extend(scan_2b())
-
-    print("[*] جاري فحص جوميا...")
-    all_deals.extend(scan_jumia())
 
     print("[*] جاري فحص نون...")
     all_deals.extend(scan_noon())
 
-    print("[*] جاري فحص أمازون...")
-    all_deals.extend(scan_amazon())
+    print("[*] جاري فحص جوميا...")
+    all_deals.extend(scan_jumia())
 
-    # إزالة التكرارات بنفس الـ ID
-    unique_deals = {d["id"]: d for d in all_deals}.values()
+    unique_deals = list({d["id"]: d for d in all_deals}.values())
     strong_deals = [d for d in unique_deals if d["discount"] >= MIN_DISCOUNT]
     
-    print(f"[+] إجمالي المنتجات المفحوصة بخصومات: {len(unique_deals)} | منها فوق {MIN_DISCOUNT}%: {len(strong_deals)}")
+    print(f"[+] إجمالي المنتجات المستخرجة بخصومات: {len(unique_deals)} | منها فوق {MIN_DISCOUNT}%: {len(strong_deals)}")
 
-    # إرسال أعلى 3 عروض كعينة لو مفيش عرض معدي 40% في أول تجربة
-    if "_sample_sent_" not in seen and not strong_deals and unique_deals:
+    # إرسال أعلى 3 عروض كعينة فورية على تليجرام للتأكد من شكل الرسائل
+    if "_sample_sent_v2_" not in seen and unique_deals:
         top_samples = sorted(unique_deals, key=lambda x: x["discount"], reverse=True)[:3]
-        send_telegram_msg(f"📡 <b>تقرير الفحص:</b>\nتم فحص <b>{len(unique_deals)}</b> منتج بنجاح! إليك أعلى 3 خصومات متاحة حالياً كعينة:")
+        send_telegram_msg(f"📡 <b>تقرير الرادار الحي:</b>\nتم استخراج <b>{len(unique_deals)}</b> عرض بخصومات مؤكدة! إليك أعلى 3 عروض تم التقاطها الآن:")
         for d in top_samples:
             send_deal_to_telegram(d)
             time.sleep(1)
-        seen["_sample_sent_"] = 1
+        seen["_sample_sent_v2_"] = 1
 
     new_sent = 0
     for deal in strong_deals:
