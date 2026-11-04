@@ -1,0 +1,40 @@
+name: Auto Deals Scanner 40%+
+
+on:
+  schedule:
+    - cron: '*/15 * * * *' # يشتغل كل 15 دقيقة على مدار الـ 24 ساعة
+  workflow_dispatch: # للتشغيل اليدوي الفوري
+
+permissions:
+  contents: write
+
+jobs:
+  scan-deals:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1. Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 2. Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 3. Install Requirements & Browser
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: 4. Run Deals Scanner
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python main.py
+
+      - name: 5. Save Seen Deals Memory
+        run: |
+          git config --global user.name "DealsBot"
+          git config --global user.email "bot@noreply.github.com"
+          git add seen_deals.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update seen deals" && git push)
