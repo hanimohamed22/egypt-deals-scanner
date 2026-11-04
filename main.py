@@ -16,20 +16,21 @@ SEEN_FILE = "seen_deals.json"
 
 ARABIC_MAP = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
 HEADERS = {"Accept-Language": "ar-EG,ar;q=0.9,en;q=0.7"}
-REPORT = []  # حالة كل مصدر في التشغيل ده
+REPORT = []
 
 
 def norm(text):
-    return str(text).translate(ARABIC_MAP)
+    return str(text or "").translate(ARABIC_MAP)
 
 
 def clean_num(text):
-    m = re.search(r"\d+(?:\.\d+)?", norm(text or "").replace(",", ""))
+    m = re.search(r"\d+(?:\.\d+)?", norm(text).replace(",", ""))
     return float(m.group(0)) if m else 0.0
 
 
 def save_debug(name, content):
-    with open(f"debug_{name}.html", "w", encoding="utf-8") as f:
+    safe = re.sub(r"[^\w]+", "_", name)
+    with open(f"debug_{safe}.html", "w", encoding="utf-8") as f:
         f.write(content)
 
 
@@ -145,8 +146,137 @@ def parse_2b(html_text):
         })
     return deals
 
-# parse_amazon / parse_noon / parse_jumia تتضاف هنا بنفس الشكل:
-# كل واحدة ترجع list من الـ dicts نفس اللي فوق.
+
+def parse_amazon(html_text):
+    soup = BeautifulSoup(html_text, "lxml")
+    deals = []
+    for card in soup.select("div[data-asin]"):
+        asin = card.get("data-asin", "")
+        if len(asin) != 10:
+            continue
+        title_el = card.select_one("h2")
+        img_el = card.select_one("img.s-image") or card.select_one("img")
+        title = title_el.get_text(strip=True) if title_el else (img_el.get("alt") or "" if img_el else "")
+        if len(title) < 4:
+            continue
+
+        new_el = card.select_one(".a-price:not(.a-text-price) .a-offscreen")
+        old_el = card.select_one(".a-price.a-text-price .a-offscreen")
+        new_p = clean_num(new_el.get_text()) if new_el else 0
+        old_p = clean_num(old_el.get_text()) if old_el else 0
+        if new_p < 20:
+            continue
+
+        if not old_p:
+            m = re.search(r"-\s*(\d{1,2})\s*%", norm(card.get_text(" ", strip=True)))
+            if not m:
+                continue
+            disc = int(m.group(1))
+            old_p = round(new_p / (1 - disc / 100))
+        elif old_p > new_p:
+            disc = round((old_p - new_p) / old_p * 100)
+        else:
+            continue
+
+        deals.append({
+            "id": f"amz_{asin}",
+            "store": "Amazon EG 🛒",
+            "title": title,
+            "new_price": new_p,
+            "old_price": old_p,
+            "discount": int(disc),
+            "url": f"https://www.amazon.eg/-/ar/dp/{asin}",
+            "image": img_el.get("src", "") if img_el else "",
+        })
+    return deals
+
+
+def parse_noon(html_text):
+    soup = BeautifulSoup(html_text, "lxml")
+    deals, seen_links = [], set()
+    for a in soup.select('a[href*="/p/"]'):
+        href = a.get("href", "")
+        full_url = f"https://www.noon.com{href}" if href.startswith("/") else href
+        key = full_url.split("?")[0]
+        if not key or key in seen_links:
+            continue
+
+        text = norm(a.get_text(" | ", strip=True))
+        m = re.search(r"(\d{1,2})\s*%", text)
+        if not m:
+            continue
+        disc = int(m.group(1))
+        if not 5 <= disc <= 95:
+            continue
+
+        prices = [clean_num(x) for x in re.findall(r"\d[\d,]*(?:\.\d+)?", text)]
+        prices = [p for p in prices if p > 50 and p != disc]
+        if not prices:
+            continue
+
+        new_p = min(prices)
+        old_p = max(prices) if len(set(prices)) > 1 else round(new_p / (1 - disc / 100))
+        img_el = a.select_one("img")
+        img = img_el.get("src", "") if img_el else ""
+        title = (img_el.get("alt") if img_el and img_el.get("alt") else text.split("|")[0]).strip()
+
+        seen_links.add(key)
+        deals.append({
+            "id": key,
+            "store": "Noon EG 🟡",
+            "title": title,
+            "new_price": new_p,
+            "old_price": old_p,
+            "discount": disc,
+            "url": full_url,
+            "image": img,
+        })
+    return deals
+
+
+def parse_jumia(html_text):
+    soup = BeautifulSoup(html_text, "lxml")
+    deals = []
+    for art in soup.select("article.prd"):
+        a = art.select_one("a.core")
+        if not a or not a.get("href"):
+            continue
+        href = a["href"]
+        link = f"https://www.jumia.com.eg{href}" if href.startswith("/") else href
+
+        name_el = art.select_one(".name")
+        title = name_el.get_text(strip=True) if name_el else ""
+        if len(title) < 4:
+            continue
+
+        new_p = clean_num(art.select_one(".prc").get_text()) if art.select_one(".prc") else 0
+        old_p = clean_num(art.select_one(".old").get_text()) if art.select_one(".old") else 0
+        disc_el = art.select_one("._dsct") or art.select_one(".bdg")
+        disc = int(clean_num(disc_el.get_text())) if disc_el else 0
+
+        if new_p <= 0:
+            continue
+        if not disc and old_p > new_p:
+            disc = round((old_p - new_p) / old_p * 100)
+        if disc <= 0:
+            continue
+        if not old_p:
+            old_p = round(new_p / (1 - disc / 100))
+
+        img_el = art.select_one("img")
+        img = (img_el.get("data-src") or img_el.get("src") or "") if img_el else ""
+
+        deals.append({
+            "id": link.split("?")[0],
+            "store": "Jumia EG 🟠",
+            "title": title,
+            "new_price": new_p,
+            "old_price": old_p,
+            "discount": disc,
+            "url": link,
+            "image": img,
+        })
+    return deals
 
 
 # ================= Sources =================
@@ -157,18 +287,31 @@ SOURCES = [
         "https://2b.com.eg/ar/computers.html",
         "https://2b.com.eg/ar/mobile-and-tablet.html",
         "https://2b.com.eg/ar/gaming.html",
-    ], parse_2b),
-    # ("Amazon", [...], parse_amazon),
-    # ("Noon", [...], parse_noon),
-    # ("Jumia", [...], parse_jumia),
+    ], parse_2b, "chrome120"),
+    ("Amazon", [
+        "https://www.amazon.eg/s?k=electronics&rh=p_n_pct-off-with-tax%3A26901062031",
+        "https://www.amazon.eg/s?k=phones&rh=p_n_pct-off-with-tax%3A26901062031",
+        "https://www.amazon.eg/s?k=laptop&rh=p_n_pct-off-with-tax%3A26901062031",
+        "https://www.amazon.eg/s?k=kitchen&rh=p_n_pct-off-with-tax%3A26901062031",
+    ], parse_amazon, "chrome120"),
+    ("Noon", [
+        "https://www.noon.com/egypt-ar/electronics/",
+        "https://www.noon.com/egypt-ar/mobiles/",
+        "https://www.noon.com/egypt-ar/laptops/",
+    ], parse_noon, "chrome120"),
+    ("Jumia", [
+        "https://www.jumia.com.eg/ar/flash-sales/",
+        "https://www.jumia.com.eg/ar/electronics/",
+        "https://www.jumia.com.eg/ar/phones-tablets/",
+    ], parse_jumia, "chrome120"),
 ]
 
 
-def run_source(name, urls, parser):
+def run_source(name, urls, parser, impersonate):
     deals = []
     for url in urls:
-        short = url.split("/")[-1][:25]
-        html_text, err = fetch(url)
+        short = url.split("/")[-1].split("?")[0][:25] or url.split("/")[-2]
+        html_text, err = fetch(url, impersonate=impersonate)
         if err:
             REPORT.append(f"❌ {name} ({short}): {err}")
             print(f"  [!] {name} {short}: {err}")
@@ -191,9 +334,9 @@ def main():
     seen = load_seen()
     all_deals = []
 
-    for name, urls, parser in SOURCES:
+    for name, urls, parser, imp in SOURCES:
         print(f"[*] جاري فحص {name}...")
-        all_deals.extend(run_source(name, urls, parser))
+        all_deals.extend(run_source(name, urls, parser, imp))
 
     unique = list({d["id"]: d for d in all_deals}.values())
     strong = [d for d in unique if d["discount"] >= MIN_DISCOUNT]
@@ -206,7 +349,6 @@ def main():
         seen[deal["id"]] = deal["new_price"]
         time.sleep(1.2)
 
-    # تقرير الحالة: يتبعت لو فيه فشل، أو مرة في اليوم لو عايز
     failures = [r for r in REPORT if not r.startswith("✅")]
     if failures or os.getenv("ALWAYS_REPORT") == "1":
         send_telegram_msg(
