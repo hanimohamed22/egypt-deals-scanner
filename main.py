@@ -3,10 +3,13 @@ import re
 import json
 import time
 import random
+import atexit
+import urllib.parse
 import html as htmllib
 import requests
 from bs4 import BeautifulSoup
 from curl_cffi import requests as cureq
+from playwright.sync_api import sync_playwright
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -16,6 +19,8 @@ SEEN_FILE = "seen_deals.json"
 
 ARABIC_MAP = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
 HEADERS = {"Accept-Language": "ar-EG,ar;q=0.9,en;q=0.7"}
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 REPORT = []
 
 
@@ -31,10 +36,76 @@ def clean_num(text):
 def save_debug(name, content):
     safe = re.sub(r"[^\w]+", "_", name)
     with open(f"debug_{safe}.html", "w", encoding="utf-8") as f:
-        f.write(content)
+        f.write(content or "")
 
 
-# ================= Fetch موحد =================
+# ================= Browser (Playwright) =================
+_pw = None
+_browser = None
+_ctx = None
+
+
+def get_ctx():
+    global _pw, _browser, _ctx
+    if _ctx is None:
+        _pw = sync_playwright().start()
+        _browser = _pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+        )
+        _ctx = _browser.new_context(
+            locale="ar-EG",
+            timezone_id="Africa/Cairo",
+            user_agent=UA,
+            viewport={"width": 1366, "height": 900},
+        )
+        # نوقف الصور والخطوط والفيديو عشان السرعة
+        _ctx.route("**/*", lambda route: route.abort()
+                   if route.request.resource_type in ("image", "font", "media")
+                   else route.continue_())
+    return _ctx
+
+
+def close_browser():
+    global _pw, _browser, _ctx
+    try:
+        if _browser:
+            _browser.close()
+        if _pw:
+            _pw.stop()
+    except Exception:
+        pass
+    _pw = _browser = _ctx = None
+
+
+atexit.register(close_browser)
+
+
+def fetch_browser(url, wait_selector=None):
+    """يرجّع (html, error) باستخدام متصفح حقيقي"""
+    page = get_ctx().new_page()
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        if wait_selector:
+            try:
+                page.wait_for_selector(wait_selector, timeout=15000)
+            except Exception:
+                pass
+        for _ in range(4):  # lazy loading
+            page.mouse.wheel(0, 2500)
+            page.wait_for_timeout(700)
+        html_text = page.content()
+    except Exception as e:
+        return "", str(e)[:80]
+    finally:
+        page.close()
+
+    if "Enter the characters" in html_text or "api-services-support@amazon" in html_text:
+        return "", "CAPTCHA"
+    return html_text, None
+
+
+# ================= Fetch عادي (curl_cffi) =================
 def fetch(url, impersonate="chrome120", retries=3):
     """يرجّع (html, error). لو نجح error = None"""
     proxies = {"http": PROXY, "https": PROXY} if PROXY else None
@@ -156,7 +227,8 @@ def parse_amazon(html_text):
             continue
         title_el = card.select_one("h2")
         img_el = card.select_one("img.s-image") or card.select_one("img")
-        title = title_el.get_text(strip=True) if title_el else (img_el.get("alt") or "" if img_el else "")
+        title = title_el.get_text(strip=True) if title_el else (
+            (img_el.get("alt") or "") if img_el else "")
         if len(title) < 4:
             continue
 
@@ -218,7 +290,8 @@ def parse_noon(html_text):
         old_p = max(prices) if len(set(prices)) > 1 else round(new_p / (1 - disc / 100))
         img_el = a.select_one("img")
         img = img_el.get("src", "") if img_el else ""
-        title = (img_el.get("alt") if img_el and img_el.get("alt") else text.split("|")[0]).strip()
+        title = (img_el.get("alt") if img_el and img_el.get("alt")
+                 else text.split("|")[0]).strip()
 
         seen_links.add(key)
         deals.append({
@@ -249,8 +322,10 @@ def parse_jumia(html_text):
         if len(title) < 4:
             continue
 
-        new_p = clean_num(art.select_one(".prc").get_text()) if art.select_one(".prc") else 0
-        old_p = clean_num(art.select_one(".old").get_text()) if art.select_one(".old") else 0
+        prc = art.select_one(".prc")
+        old = art.select_one(".old")
+        new_p = clean_num(prc.get_text()) if prc else 0
+        old_p = clean_num(old.get_text()) if old else 0
         disc_el = art.select_one("._dsct") or art.select_one(".bdg")
         disc = int(clean_num(disc_el.get_text())) if disc_el else 0
 
@@ -280,6 +355,7 @@ def parse_jumia(html_text):
 
 
 # ================= Sources =================
+# كل مصدر: (الاسم، الروابط، الـ parser، المحرك، selector ينتظره المتصفح)
 SOURCES = [
     ("2B", [
         "https://2b.com.eg/ar/home-appliances.html",
@@ -287,31 +363,38 @@ SOURCES = [
         "https://2b.com.eg/ar/computers.html",
         "https://2b.com.eg/ar/mobile-and-tablet.html",
         "https://2b.com.eg/ar/gaming.html",
-    ], parse_2b, "chrome120"),
+    ], parse_2b, "http", None),
     ("Amazon", [
         "https://www.amazon.eg/s?k=electronics&rh=p_n_pct-off-with-tax%3A26901062031",
         "https://www.amazon.eg/s?k=phones&rh=p_n_pct-off-with-tax%3A26901062031",
         "https://www.amazon.eg/s?k=laptop&rh=p_n_pct-off-with-tax%3A26901062031",
         "https://www.amazon.eg/s?k=kitchen&rh=p_n_pct-off-with-tax%3A26901062031",
-    ], parse_amazon, "chrome120"),
+    ], parse_amazon, "browser", "div[data-asin]"),
     ("Noon", [
         "https://www.noon.com/egypt-ar/electronics/",
         "https://www.noon.com/egypt-ar/mobiles/",
         "https://www.noon.com/egypt-ar/laptops/",
-    ], parse_noon, "chrome120"),
+    ], parse_noon, "browser", 'a[href*="/p/"]'),
     ("Jumia", [
         "https://www.jumia.com.eg/ar/flash-sales/",
         "https://www.jumia.com.eg/ar/electronics/",
         "https://www.jumia.com.eg/ar/phones-tablets/",
-    ], parse_jumia, "chrome120"),
+    ], parse_jumia, "browser", "article.prd"),
 ]
 
 
-def run_source(name, urls, parser, impersonate):
+def run_source(name, urls, parser, engine, wait_selector):
     deals = []
     for url in urls:
-        short = url.split("/")[-1].split("?")[0][:25] or url.split("/")[-2]
-        html_text, err = fetch(url, impersonate=impersonate)
+        p = urllib.parse.urlparse(url)
+        q = urllib.parse.parse_qs(p.query).get("k", [None])[0]
+        short = q or p.path.strip("/").split("/")[-1][:25] or p.netloc
+
+        if engine == "browser":
+            html_text, err = fetch_browser(url, wait_selector)
+        else:
+            html_text, err = fetch(url)
+
         if err:
             REPORT.append(f"❌ {name} ({short}): {err}")
             print(f"  [!] {name} {short}: {err}")
@@ -333,10 +416,12 @@ def run_source(name, urls, parser, impersonate):
 def main():
     seen = load_seen()
     all_deals = []
-
-    for name, urls, parser, imp in SOURCES:
-        print(f"[*] جاري فحص {name}...")
-        all_deals.extend(run_source(name, urls, parser, imp))
+    try:
+        for name, urls, parser, engine, wait_sel in SOURCES:
+            print(f"[*] جاري فحص {name}...")
+            all_deals.extend(run_source(name, urls, parser, engine, wait_sel))
+    finally:
+        close_browser()
 
     unique = list({d["id"]: d for d in all_deals}.values())
     strong = [d for d in unique if d["discount"] >= MIN_DISCOUNT]
